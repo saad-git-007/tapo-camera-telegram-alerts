@@ -8,12 +8,13 @@ Tested setup:
 - Raspberry Pi 4 with 4 GB RAM
 - Raspberry Pi OS Bookworm
 - Tapo camera models that support RTSP streaming
+- Stable operation tested up to 5 FPS; above that, Raspberry Pi 4 thermal throttling became an issue during longer runs
 
 ## What It Does
 
 - Connects to a Tapo RTSP stream with OpenCV
 - Detects faces with the OpenCV DNN face detector
-- Detects people, backpacks, and suitcases with YOLO11 NCNN
+- Detects people, backpacks, and suitcases with YOLO11n NCNN
 - Uses backpack and suitcase detections as package-like proxies
 - Sends annotated photo alerts to Telegram
 - Supports standard chats and Telegram forum topic threads
@@ -30,6 +31,12 @@ Tested setup:
 - Face detection
 - Person detection
 - Package-like detection using `backpack` and `suitcase` classes as practical proxies
+
+## Detection Models
+
+- Face detection uses the OpenCV DNN Caffe SSD face detector
+- Person and package-like detection use YOLO11n exported in NCNN format
+- NCNN is a good fit for Raspberry Pi because it is lightweight and optimized for edge-style inference workloads
 
 ## Project Files
 
@@ -78,13 +85,30 @@ You also need OpenCV available for Python. On Raspberry Pi OS Bookworm, there ar
 1. Install `opencv-python` into the virtual environment
 2. Install `python3-opencv` on the system and create the venv with access to system site packages
 
+## Camera Preparation
+
+Before using the detector, create a Camera Account in the Tapo app and assign a username and password for the camera's RTSP access.
+
+Those same camera-account credentials are what you place in the RTSP URL in `config.py`, for example:
+
+```text
+rtsp://username:password@camera_ip_address:554/stream2
+```
+
+Tapo cameras typically expose multiple RTSP streams. In most setups:
+
+- `stream1` is the higher-quality stream
+- `stream2` is the lower-quality stream and is lighter on the Raspberry Pi
+
+This code has been tested with `stream2`.
+
 ## Setup
 
 Clone the repository on the Pi to the expected path:
 
 ```bash
 cd /home/pi
-git clone https://github.com/YOUR_USERNAME/tapo-camera-telegram-alerts.git telegram_porch_detector
+git clone https://github.com/saad-git-007/tapo-camera-telegram-alerts.git telegram_porch_detector
 cd telegram_porch_detector
 ```
 
@@ -117,18 +141,30 @@ You can also tune:
 - Snapshot and video retention
 - Detection loop FPS and video recording length
 
+The default detector loop in `config.py` is conservative for Raspberry Pi use. This project has been tested up to 5 FPS on a Pi 4 with 4 GB RAM. Higher values increased heat and led to thermal throttling in extended runs.
+
 ## Telegram Setup
 
-1. Create a Telegram bot with `@BotFather`
-2. Send a message to the bot from the chat where you want alerts
-3. Run:
+1. Open Telegram and search for `@BotFather`
+2. Start a chat with `@BotFather` and run the `/newbot` command
+3. Follow the prompts to give your bot a display name and a unique bot username
+4. BotFather will return a bot token that looks similar to:
+
+```text
+123456789:AAExampleTokenHere
+```
+
+5. Copy that token into `TELEGRAM_BOT_TOKEN` in `config.py`
+6. Send a message to your new bot from the Telegram chat where you want alerts to arrive
+7. Run:
 
 ```bash
 python3 get_chat_id.py
 ```
 
-4. Copy the numeric chat ID into `config.py`
-5. Optionally test messaging with:
+8. Copy the numeric chat ID printed by the script into `TELEGRAM_CHAT_ID` in `config.py`
+9. If you are sending alerts into a Telegram forum topic, also set `TELEGRAM_MESSAGE_THREAD_ID`
+10. Optionally test messaging with:
 
 ```bash
 python3 telegram_test.py
