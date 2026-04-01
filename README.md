@@ -1,20 +1,20 @@
-# Tapo Camera Telegram Alerts
+# TP-LINK Tapo Camera Telegram Alerts
 
-Local porch monitoring for Tapo cameras with RTSP enabled, designed for a Raspberry Pi 4 and Telegram-based alert delivery.
+Local porch monitoring for TP-LINK Tapo cameras with RTSP enabled, designed for a Raspberry Pi 4 and above and Telegram-based photo alert delivery.
 
-This project watches an RTSP stream, runs local face and object detection, saves annotated snapshots, records follow-up video clips, and sends photo alerts to Telegram without any paid cloud service.
+This project watches a local RTSP camera stream, runs local face and object detection, saves annotated snapshots, records after detection video clips, and sends photo alerts to Telegram without any paid cloud service.
 
 Tested setup:
 - Raspberry Pi 4 with 4 GB RAM
-- Raspberry Pi OS Bookworm
+- Raspberry Pi OS Bookworm or newer
 - Tapo camera models that support RTSP streaming
-- Stable operation tested up to 5 FPS; above that, Raspberry Pi 4 thermal throttling became an issue during longer runs
+- Stable operation tested up to 5 FPS; above that, Raspberry Pi 4 thermal throttling became an issue during longer runs, can be solved with a fan cooling case.
 
 ## What It Does
 
 - Connects to a Tapo RTSP stream with OpenCV
 - Detects faces with the OpenCV DNN face detector
-- Detects people, backpacks, and suitcases with YOLO11n NCNN
+- Detects people and delivery packages with YOLO11n NCNN
 - Uses backpack and suitcase detections as package-like proxies
 - Sends annotated photo alerts to Telegram
 - Supports standard chats and Telegram forum topic threads
