@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+venv/
+.venv/
+
+detector.log
+temp_log.txt
+
+models/
+
+porch_snapshots/
+porch_videos/
