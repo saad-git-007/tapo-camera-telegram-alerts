@@ -187,7 +187,7 @@ The launcher will:
 
 ## Notes
 
-- The camera frame is rotated 90 degrees clockwise before detection and recording
+- The camera frame is rotated 90 degrees clockwise before detection and recording. This was done for a Tapo camera mounted in portrait orientation. If your camera is mounted in landscape orientation, comment out the three `cv2.rotate(..., cv2.ROTATE_90_CLOCKWISE)` lines in `detector.py`, currently at lines 294, 355, and 491
 - Face model files are downloaded automatically on first run if they are missing
 - Package alerts are heuristic alerts, not parcel-specific recognition
 - `temp_logger.sh` is optional and intended for Raspberry Pi systems that provide `vcgencmd`
