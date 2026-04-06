@@ -42,6 +42,11 @@ PERSON_IGNORE_BOTTOM_RATIO = 0.20
 # YOLO confidence for person / backpack / suitcase detections.
 YOLO_CONF = 0.40
 
+# Custom package model
+PACKAGE_MODEL_PATH = "/home/pi/telegram_porch_detector/package_yolo11n_ncnn_model"
+PACKAGE_CONF = 0.35
+MIN_PACKAGE_SIZE_PX = 40
+
 # ── Alert logic ─────────────────────────────────────────────────
 FACE_COOLDOWN_SEC = 60
 PERSON_COOLDOWN_SEC = 60

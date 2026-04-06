@@ -1,19 +1,16 @@
 """
-Porch Security Detector — Telegram Edition (OpenCV DNN face + YOLO11 NCNN)
-==========================================================================
+Porch Security Detector — Telegram Edition
+==========================================
 
 Detection triggers:
   1. OpenCV DNN face detector (Caffe SSD)
-  2. Ultralytics YOLO11 NCNN for person + backpack + suitcase
+  2. Ultralytics YOLO11 NCNN for person
+  3. Ultralytics YOLO11 NCNN custom package model
 
 Alert delivery:
   - Annotated JPEG saved to SNAPSHOT_DIR
   - Telegram bot uploads the local JPEG directly using sendPhoto
   - 1-minute MP4 video recorded after the first trigger in a burst
-
-Notes:
-  - backpack/suitcase are only package proxies, not true parcel detection
-  - downloads the OpenCV face model files automatically the first time
 """
 
 from __future__ import annotations
@@ -60,7 +57,7 @@ FACE_MODEL_URL = (
     "dnn_samples_face_detector_20170830/"
     "res10_300x300_ssd_iter_140000.caffemodel"
 )
-YOLO_CLASSES = [0, 24, 28]  # person, backpack, suitcase
+PERSON_CLASSES = [0]
 
 
 def validate_config():
@@ -160,9 +157,7 @@ class TelegramSender(threading.Thread):
 
         try:
             with open(image_path, "rb") as f:
-                files = {
-                    "photo": (os.path.basename(image_path), f, "image/jpeg"),
-                }
+                files = {"photo": (os.path.basename(image_path), f, "image/jpeg")}
                 r = self._session.post(url, data=data, files=files, timeout=(10, 90))
 
             if r.status_code != 200:
@@ -199,18 +194,14 @@ class MediaCleaner(threading.Thread):
                     f = os.path.abspath(f)
                     if self.sender.is_pending(f):
                         continue
-                    age = now - os.path.getmtime(f)
-                    if age > config.SNAPSHOT_MAX_AGE_SEC:
+                    if now - os.path.getmtime(f) > config.SNAPSHOT_MAX_AGE_SEC:
                         os.remove(f)
-                        log.debug("Deleted old snapshot: %s", f)
 
                 video_pattern = os.path.join(config.VIDEO_DIR, "*.mp4")
                 for f in glob.glob(video_pattern):
                     f = os.path.abspath(f)
-                    age = now - os.path.getmtime(f)
-                    if age > config.VIDEO_MAX_AGE_SEC:
+                    if now - os.path.getmtime(f) > config.VIDEO_MAX_AGE_SEC:
                         os.remove(f)
-                        log.debug("Deleted old video: %s", f)
 
             except Exception as e:
                 log.warning("Media cleanup error: %s", e)
@@ -273,17 +264,10 @@ class VideoRecorder(threading.Thread):
         self._stop_at = 0.0
         self._active = False
 
-    def is_recording(self) -> bool:
-        with self._lock:
-            return self._active
-
     def start_recording(self, reason: str) -> bool:
         with self._lock:
             if self._active:
-                log.info(
-                    "Video recording already active, skipping new trigger: %s",
-                    reason,
-                )
+                log.info("Video recording already active, skipping new trigger: %s", reason)
                 return False
 
         frame = self.capture.get_frame()
@@ -340,10 +324,8 @@ class VideoRecorder(threading.Thread):
                     self._video_path = None
                     self._stop_at = 0.0
                     self._active = False
-
                 if writer is not None:
                     writer.release()
-
                 log.info("Video recording finished: %s", done_path)
                 continue
 
@@ -396,8 +378,7 @@ def add_timestamp(frame):
 def save_snapshot(frame: np.ndarray, prefix: str) -> str:
     Path(config.SNAPSHOT_DIR).mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{prefix}_{ts}.jpg"
-    path = os.path.abspath(os.path.join(config.SNAPSHOT_DIR, filename))
+    path = os.path.abspath(os.path.join(config.SNAPSHOT_DIR, f"{prefix}_{ts}.jpg"))
     ok = cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         raise RuntimeError(f"Failed to write snapshot: {path}")
@@ -408,17 +389,14 @@ def save_snapshot(frame: np.ndarray, prefix: str) -> str:
 def ensure_face_model_files():
     FACE_DIR.mkdir(parents=True, exist_ok=True)
     if not FACE_PROTO.exists():
-        log.info("Downloading OpenCV face prototxt…")
         urllib.request.urlretrieve(FACE_PROTO_URL, FACE_PROTO)
     if not FACE_MODEL.exists():
-        log.info("Downloading OpenCV face caffemodel…")
         urllib.request.urlretrieve(FACE_MODEL_URL, FACE_MODEL)
 
 
 def load_face_detector():
     ensure_face_model_files()
-    net = cv2.dnn.readNetFromCaffe(str(FACE_PROTO), str(FACE_MODEL))
-    return net
+    return cv2.dnn.readNetFromCaffe(str(FACE_PROTO), str(FACE_MODEL))
 
 
 def detect_faces_dnn(face_net, frame, min_confidence=0.65):
@@ -432,32 +410,35 @@ def detect_faces_dnn(face_net, frame, min_confidence=0.65):
         conf = float(detections[0, 0, i, 2])
         if conf < min_confidence:
             continue
-
         box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
         x1, y1, x2, y2 = box.astype(int)
         x1, y1, x2, y2 = clamp_box(x1, y1, x2, y2, w, h)
-        if x2 <= x1 or y2 <= y1:
-            continue
-
-        faces.append((x1, y1, x2, y2, conf))
+        if x2 > x1 and y2 > y1:
+            faces.append((x1, y1, x2, y2, conf))
 
     return faces
 
 
-def load_yolo_detector():
-    log.info("Loading YOLO model yolo11n_ncnn_model…")
+def load_person_detector():
+    log.info("Loading person model yolo11n_ncnn_model…")
     return YOLO("/home/pi/telegram_porch_detector/yolo11n_ncnn_model", task="detect")
+
+
+def load_package_detector():
+    log.info("Loading package model %s…", config.PACKAGE_MODEL_PATH)
+    return YOLO(config.PACKAGE_MODEL_PATH, task="detect")
 
 
 def main():
     validate_config()
 
     log.info("═" * 60)
-    log.info("  Porch Detector starting up (OpenCV DNN face + YOLO11)")
+    log.info("  Porch Detector starting up (OpenCV DNN face + YOLO11 custom package)")
     log.info("═" * 60)
 
     face_net = load_face_detector()
-    yolo = load_yolo_detector()
+    person_yolo = load_person_detector()
+    package_yolo = load_package_detector()
 
     sender = TelegramSender()
     sender.start()
@@ -487,13 +468,11 @@ def main():
             time.sleep(0.1)
             continue
 
-        # Permanently rotate 90 degrees clockwise before all detection
         frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
         h, w = frame.shape[:2]
         canvas = frame.copy()
 
-        # Smaller frame for speed
         target_w = 640
         scale = target_w / w if w > target_w else 1.0
         small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale != 1.0 else frame.copy()
@@ -502,7 +481,6 @@ def main():
         trigger_face = False
         trigger_package = False
 
-        # Face detection on the resized frame (independent of person detection)
         faces = detect_faces_dnn(
             face_net,
             small,
@@ -522,23 +500,20 @@ def main():
             trigger_face = True
             log.info("Face detected — %dx%d px conf=%.2f", x2 - x1, y2 - y1, conf)
 
-        # YOLO person/package on the resized frame
-        results = yolo(
+        person_results = person_yolo(
             small,
-            classes=YOLO_CLASSES,
+            classes=PERSON_CLASSES,
             conf=float(getattr(config, "YOLO_CONF", 0.40)),
             imgsz=640,
             verbose=False,
         )
 
-        for result in results:
+        for result in person_results:
             boxes = result.boxes
-            names = result.names
             if boxes is None:
                 continue
 
             for box in boxes:
-                cls_id = int(box.cls[0].item())
                 conf = float(box.conf[0].item())
                 x1s, y1s, x2s, y2s = [int(v) for v in box.xyxy[0].tolist()]
 
@@ -547,51 +522,66 @@ def main():
                 x2 = int(x2s / scale)
                 y2 = int(y2s / scale)
                 x1, y1, x2, y2 = clamp_box(x1, y1, x2, y2, w, h)
-                label_name = names.get(cls_id, str(cls_id))
 
-                if cls_id == 0:
-                    box_h = y2 - y1
-                    height_ratio = box_h / h
+                box_h = y2 - y1
+                height_ratio = box_h / h
+                if height_ratio < config.MIN_PERSON_HEIGHT_RATIO:
+                    continue
 
-                    if height_ratio < config.MIN_PERSON_HEIGHT_RATIO:
-                        continue
+                ignore_bottom_ratio = float(getattr(config, "PERSON_IGNORE_BOTTOM_RATIO", 0.20))
+                ignore_y = int(h * (1.0 - ignore_bottom_ratio))
+                center_y = int((y1 + y2) / 2)
 
-                    # Ignore person detections whose box center falls in the bottom
-                    # configured portion of the rotated upright frame.
-                    ignore_bottom_ratio = float(
-                        getattr(config, "PERSON_IGNORE_BOTTOM_RATIO", 0.20)
-                    )
-                    ignore_y = int(h * (1.0 - ignore_bottom_ratio))
-                    center_y = int((y1 + y2) / 2)
-
-                    if center_y >= ignore_y:
-                        log.info(
-                            "Rejected person candidate — center in bottom blind spot "
-                            "center_y=%d ignore_y=%d conf=%.2f",
-                            center_y,
-                            ignore_y,
-                            conf,
-                        )
-                        continue
-
-                    draw_box(canvas, x1, y1, x2, y2, f"Person {conf:.2f}", (255, 80, 0))
-                    trigger_person = True
+                if center_y >= ignore_y:
                     log.info(
-                        "Person detected — box height %.0f%% conf=%.2f center_y=%d",
-                        height_ratio * 100,
-                        conf,
+                        "Rejected person candidate — center in bottom blind spot "
+                        "center_y=%d ignore_y=%d conf=%.2f",
                         center_y,
+                        ignore_y,
+                        conf,
                     )
+                    continue
 
-                else:
-                    # backpack/suitcase are only rough package proxies
-                    area_ratio = ((x2 - x1) * (y2 - y1)) / float(w * h)
-                    if area_ratio < 0.01:
-                        continue
+                draw_box(canvas, x1, y1, x2, y2, f"Person {conf:.2f}", (255, 80, 0))
+                trigger_person = True
+                log.info(
+                    "Person detected — box height %.0f%% conf=%.2f center_y=%d",
+                    height_ratio * 100,
+                    conf,
+                    center_y,
+                )
 
-                    draw_box(canvas, x1, y1, x2, y2, f"{label_name.title()} {conf:.2f}", (0, 140, 255))
-                    trigger_package = True
-                    log.info("Package-proxy detected — %s conf=%.2f", label_name, conf)
+        package_results = package_yolo(
+            small,
+            conf=float(getattr(config, "PACKAGE_CONF", 0.35)),
+            imgsz=640,
+            verbose=False,
+        )
+
+        for result in package_results:
+            boxes = result.boxes
+            names = result.names
+            if boxes is None:
+                continue
+
+            for box in boxes:
+                conf = float(box.conf[0].item())
+                cls_id = int(box.cls[0].item())
+                x1s, y1s, x2s, y2s = [int(v) for v in box.xyxy[0].tolist()]
+
+                x1 = int(x1s / scale)
+                y1 = int(y1s / scale)
+                x2 = int(x2s / scale)
+                y2 = int(y2s / scale)
+                x1, y1, x2, y2 = clamp_box(x1, y1, x2, y2, w, h)
+
+                if (x2 - x1) < config.MIN_PACKAGE_SIZE_PX or (y2 - y1) < config.MIN_PACKAGE_SIZE_PX:
+                    continue
+
+                label_name = names.get(cls_id, "package")
+                draw_box(canvas, x1, y1, x2, y2, f"{label_name.title()} {conf:.2f}", (0, 140, 255))
+                trigger_package = True
+                log.info("Package detected — %s conf=%.2f", label_name, conf)
 
         add_timestamp(canvas)
 
@@ -620,11 +610,7 @@ def main():
 
         if trigger_package and cooldown.ready("package", config.PACKAGE_COOLDOWN_SEC):
             ts_str = datetime.now().strftime("%d %b %Y  %I:%M:%S %p")
-            caption = (
-                "📦 *Package-like item detected at porch!*\n"
-                "_(backpack/suitcase proxy)_\n"
-                f"{ts_str}"
-            )
+            caption = f"📦 *Package detected at porch!*\n{ts_str}"
             image_path = save_snapshot(canvas, "package")
             sender.enqueue(image_path, caption)
 
