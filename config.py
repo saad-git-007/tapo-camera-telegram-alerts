@@ -39,7 +39,7 @@ MIN_PERSON_HEIGHT_RATIO = 0.25
 # 20% of the rotated upright frame.
 PERSON_IGNORE_BOTTOM_RATIO = 0.20
 
-# YOLO confidence for person / backpack / suitcase detections.
+# YOLO confidence for person detections.
 YOLO_CONF = 0.40
 
 # Custom package model
@@ -47,10 +47,15 @@ PACKAGE_MODEL_PATH = "/home/pi/telegram_porch_detector/package_yolo11n_ncnn_mode
 PACKAGE_CONF = 0.35
 MIN_PACKAGE_SIZE_PX = 40
 
-# ── Alert logic ─────────────────────────────────────────────────
-FACE_COOLDOWN_SEC = 60
-PERSON_COOLDOWN_SEC = 60
-PACKAGE_COOLDOWN_SEC = 60
+# ── Alert memory / stationary suppression ──────────────────────
+# Treat detections as the same stationary event when the box center and size
+# stay within this many pixels.
+ALERT_POSITION_TOLERANCE_PX = 40
+
+# Suppress repeat alerts for the same stationary position for 24 hours.
+FACE_STATIONARY_COOLDOWN_SEC = 24 * 3600
+PERSON_STATIONARY_COOLDOWN_SEC = 24 * 3600
+PACKAGE_STATIONARY_COOLDOWN_SEC = 24 * 3600
 
 # ── Performance ────────────────────────────────────────────────
 TARGET_FPS = 3

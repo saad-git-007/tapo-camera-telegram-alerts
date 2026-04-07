@@ -15,6 +15,7 @@ Alert delivery:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import cv2
 import time
 import threading
@@ -58,6 +59,7 @@ FACE_MODEL_URL = (
     "res10_300x300_ssd_iter_140000.caffemodel"
 )
 PERSON_CLASSES = [0]
+Box = tuple[int, int, int, int]
 
 
 def validate_config():
@@ -84,6 +86,67 @@ def clamp_box(x1: int, y1: int, x2: int, y2: int, w: int, h: int):
     x2 = max(0, min(x2, w - 1))
     y2 = max(0, min(y2, h - 1))
     return x1, y1, x2, y2
+
+
+@dataclass
+class RememberedBox:
+    box: Box
+    alerted_at: float
+
+
+class StationaryAlertMemory:
+    def __init__(self, label: str, tolerance_px: int, stationary_cooldown_sec: float):
+        self.label = label
+        self.tolerance_px = int(tolerance_px)
+        self.stationary_cooldown_sec = float(stationary_cooldown_sec)
+        self._remembered: list[RememberedBox] = []
+
+    def _prune_expired(self, now: float):
+        self._remembered = [
+            entry
+            for entry in self._remembered
+            if now - entry.alerted_at < self.stationary_cooldown_sec
+        ]
+
+    def _same_position(self, box_a: Box, box_b: Box) -> bool:
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+
+        aw = ax2 - ax1
+        ah = ay2 - ay1
+        bw = bx2 - bx1
+        bh = by2 - by1
+
+        acx = ax1 + (aw / 2.0)
+        acy = ay1 + (ah / 2.0)
+        bcx = bx1 + (bw / 2.0)
+        bcy = by1 + (bh / 2.0)
+
+        tol = self.tolerance_px
+        return (
+            abs(acx - bcx) <= tol
+            and abs(acy - bcy) <= tol
+            and abs(aw - bw) <= tol
+            and abs(ah - bh) <= tol
+        )
+
+    def new_boxes(self, boxes: list[Box], now: float | None = None) -> list[Box]:
+        now = time.time() if now is None else now
+        self._prune_expired(now)
+
+        fresh_boxes = []
+        for box in boxes:
+            if any(self._same_position(box, entry.box) for entry in self._remembered):
+                continue
+            if any(self._same_position(box, fresh_box) for fresh_box in fresh_boxes):
+                continue
+            fresh_boxes.append(box)
+        return fresh_boxes
+
+    def remember_boxes(self, boxes: list[Box], now: float | None = None):
+        now = time.time() if now is None else now
+        for box in self.new_boxes(boxes, now):
+            self._remembered.append(RememberedBox(box=box, alerted_at=now))
 
 
 class TelegramSender(threading.Thread):
@@ -205,18 +268,6 @@ class MediaCleaner(threading.Thread):
 
             except Exception as e:
                 log.warning("Media cleanup error: %s", e)
-
-
-class Cooldown:
-    def __init__(self):
-        self._last = {}
-
-    def ready(self, key: str, seconds: float) -> bool:
-        now = time.time()
-        if now - self._last.get(key, 0) >= seconds:
-            self._last[key] = now
-            return True
-        return False
 
 
 class FrameCapture(threading.Thread):
@@ -452,7 +503,28 @@ def main():
     cleaner = MediaCleaner(sender)
     cleaner.start()
 
-    cooldown = Cooldown()
+    position_tolerance_px = int(getattr(config, "ALERT_POSITION_TOLERANCE_PX", 40))
+    face_memory = StationaryAlertMemory(
+        "face",
+        tolerance_px=position_tolerance_px,
+        stationary_cooldown_sec=float(
+            getattr(config, "FACE_STATIONARY_COOLDOWN_SEC", 24 * 3600)
+        ),
+    )
+    person_memory = StationaryAlertMemory(
+        "person",
+        tolerance_px=position_tolerance_px,
+        stationary_cooldown_sec=float(
+            getattr(config, "PERSON_STATIONARY_COOLDOWN_SEC", 24 * 3600)
+        ),
+    )
+    package_memory = StationaryAlertMemory(
+        "package",
+        tolerance_px=position_tolerance_px,
+        stationary_cooldown_sec=float(
+            getattr(config, "PACKAGE_STATIONARY_COOLDOWN_SEC", 24 * 3600)
+        ),
+    )
 
     log.info("Waiting for first camera frame…")
     while capture.get_frame() is None:
@@ -480,6 +552,9 @@ def main():
         trigger_person = False
         trigger_face = False
         trigger_package = False
+        face_boxes: list[Box] = []
+        person_boxes: list[Box] = []
+        package_boxes: list[Box] = []
 
         faces = detect_faces_dnn(
             face_net,
@@ -496,6 +571,7 @@ def main():
             if (x2 - x1) < config.MIN_FACE_SIZE_PX or (y2 - y1) < config.MIN_FACE_SIZE_PX:
                 continue
 
+            face_boxes.append((x1, y1, x2, y2))
             draw_box(canvas, x1, y1, x2, y2, f"Face {conf:.2f}", (0, 220, 0))
             trigger_face = True
             log.info("Face detected — %dx%d px conf=%.2f", x2 - x1, y2 - y1, conf)
@@ -542,6 +618,7 @@ def main():
                     )
                     continue
 
+                person_boxes.append((x1, y1, x2, y2))
                 draw_box(canvas, x1, y1, x2, y2, f"Person {conf:.2f}", (255, 80, 0))
                 trigger_person = True
                 log.info(
@@ -579,11 +656,16 @@ def main():
                     continue
 
                 label_name = names.get(cls_id, "package")
+                package_boxes.append((x1, y1, x2, y2))
                 draw_box(canvas, x1, y1, x2, y2, f"{label_name.title()} {conf:.2f}", (0, 140, 255))
                 trigger_package = True
                 log.info("Package detected — %s conf=%.2f", label_name, conf)
 
         add_timestamp(canvas)
+
+        new_face_boxes = face_memory.new_boxes(face_boxes, now=t_start)
+        new_person_boxes = person_memory.new_boxes(person_boxes, now=t_start)
+        new_package_boxes = package_memory.new_boxes(package_boxes, now=t_start)
 
         video_reason = None
         if trigger_face:
@@ -596,23 +678,26 @@ def main():
         if video_reason is not None:
             recorder.start_recording(video_reason)
 
-        if trigger_face and cooldown.ready("face", config.FACE_COOLDOWN_SEC):
+        if new_face_boxes:
             ts_str = datetime.now().strftime("%d %b %Y  %I:%M:%S %p")
             caption = f"🙂 *Face detected at porch!*\n{ts_str}"
             image_path = save_snapshot(canvas, "face")
             sender.enqueue(image_path, caption)
+            face_memory.remember_boxes(new_face_boxes, now=t_start)
 
-        if trigger_person and cooldown.ready("person", config.PERSON_COOLDOWN_SEC):
+        if new_person_boxes:
             ts_str = datetime.now().strftime("%d %b %Y  %I:%M:%S %p")
             caption = f"🚨 *Person detected at porch!*\n{ts_str}"
             image_path = save_snapshot(canvas, "person")
             sender.enqueue(image_path, caption)
+            person_memory.remember_boxes(new_person_boxes, now=t_start)
 
-        if trigger_package and cooldown.ready("package", config.PACKAGE_COOLDOWN_SEC):
+        if new_package_boxes:
             ts_str = datetime.now().strftime("%d %b %Y  %I:%M:%S %p")
             caption = f"📦 *Package detected at porch!*\n{ts_str}"
             image_path = save_snapshot(canvas, "package")
             sender.enqueue(image_path, caption)
+            package_memory.remember_boxes(new_package_boxes, now=t_start)
 
         elapsed = time.time() - t_start
         time.sleep(max(0.0, FRAME_INTERVAL - elapsed))
