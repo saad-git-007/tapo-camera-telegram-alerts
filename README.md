@@ -1,8 +1,8 @@
 # TP-LINK Tapo Camera Telegram Alerts
 
-Local porch monitoring for TP-LINK Tapo cameras with RTSP enabled, designed for a Raspberry Pi 4 and above and Telegram-based photo alert delivery.
+Local porch monitoring for TP-LINK Tapo cameras with RTSP enabled, designed for a Raspberry Pi 4 and above and Telegram-based photo and video alert delivery.
 
-This project watches a local RTSP camera stream, runs local face and object detection, saves annotated snapshots, records after detection video clips, and sends photo alerts to Telegram without any paid cloud service.
+This project watches a local RTSP camera stream, runs local face and object detection, saves annotated snapshots, records post-detection video clips, and sends both photo alerts and completed detection videos to Telegram without any paid cloud service.
 
 Tested setup:
 - Raspberry Pi 4 with 4 GB RAM
@@ -19,7 +19,11 @@ Tested setup:
 - Sends annotated photo alerts and detection videos to Telegram
 - Supports standard chats and Telegram forum topic threads
 - Records a configurable MP4 clip after the first trigger in a burst
-- Applies separate per-category alert cooldowns for face, person, and package alerts
+- Uploads the finished MP4 detection video to Telegram after recording completes
+- Applies separate per-category 60-second alert cooldowns for face, person, and package alerts
+- Keeps separate 24-hour remembered-box position memory for face, person, and package detections
+- Uses a configurable pixel tolerance to decide whether a new box is really a new event or the same stationary detection
+- Keeps the single-recording behavior: once recording starts, additional triggers do not start another video until the current one finishes
 - Adds timestamps to saved images and recorded video
 - Retries Telegram uploads automatically with backoff if the network is down
 - Reconnects to the camera stream automatically if RTSP drops
@@ -51,7 +55,8 @@ Tested setup:
 - `telegram_test.py`: Sends a test message and optional test photo to Telegram
 - `get_chat_id.py`: Prints chat IDs seen by your Telegram bot
 - `temp_logger.sh`: Optional Pi temperature logger
-- `yolo11n_ncnn_model/`: YOLO11 NCNN export used by the detector at runtime
+- `yolo11n_ncnn_model/`: YOLO11 NCNN export used for person detection at runtime
+- `package_yolo11n_ncnn_model/`: Custom YOLO11 NCNN export used for package detection at runtime
 
 ## Deployment Path
 
@@ -142,13 +147,24 @@ You can also tune:
 - YOLO confidence
 - Package model path
 - Package confidence and minimum package size
+- Face, person, and package 60-second alert cooldowns
+- Face, person, and package stationary-memory cooldowns
+- Alert position tolerance in pixels
 - Person height threshold
 - Person bottom blind-spot filter
-- Cooldowns
 - Snapshot and video retention
 - Detection loop FPS and video recording length
 
 The default detector loop in `config.py` is conservative for Raspberry Pi use. This project has been tested up to 5 FPS on a Pi 4 with 4 GB RAM. Higher values increased heat and led to thermal throttling in extended runs.
+
+## Alert Suppression Logic
+
+- Face, person, and package detections are tracked independently, so one category does not block alerts in another
+- Each category has its own short alert cooldown, currently 60 seconds by default
+- Each category also keeps a remembered list of recently alerted bounding boxes for 24 hours by default
+- If the same category appears again in roughly the same position and size, within the configured pixel tolerance, it is treated as the same stationary event and a new Telegram alert is suppressed
+- If that category appears in a meaningfully different position, it can trigger again immediately as long as its short cooldown has expired
+- The remembered-box logic helps reduce repeated nuisance alerts from stationary faces, people, or packages while still allowing new activity elsewhere in the frame to alert normally
 
 ## Telegram Setup
 
@@ -197,6 +213,7 @@ The launcher will:
 - The camera frame is rotated 90 degrees clockwise before detection and recording. This was done for a Tapo camera mounted in portrait orientation. If your camera is mounted in landscape orientation, comment out the three `cv2.rotate(..., cv2.ROTATE_90_CLOCKWISE)` lines in `detector.py`, currently at lines 381, 445, and 621
 - Face model files are downloaded automatically on first run if they are missing
 - Package detection uses a custom one-class YOLO11n model trained for front-door package detection
+- Detection videos are sent to Telegram after the recording finishes, not at the instant the recording starts
 - `temp_logger.sh` is optional and intended for Raspberry Pi systems that provide `vcgencmd`
 
 ## Suggested Pi Usage
