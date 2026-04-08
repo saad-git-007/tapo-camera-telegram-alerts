@@ -16,10 +16,10 @@ Tested setup:
 - Detects faces with the OpenCV DNN face detector
 - Detects people with YOLO11n NCNN
 - Detects delivery packages with a custom YOLO11n package model
-- Sends annotated photo alerts to Telegram
+- Sends annotated photo alerts and detection videos to Telegram
 - Supports standard chats and Telegram forum topic threads
 - Records a configurable MP4 clip after the first trigger in a burst
-- Applies separate cooldowns for face, person, and package alerts
+- Applies separate per-category alert cooldowns for face, person, and package alerts
 - Adds timestamps to saved images and recorded video
 - Retries Telegram uploads automatically with backoff if the network is down
 - Reconnects to the camera stream automatically if RTSP drops
@@ -194,7 +194,7 @@ The launcher will:
 
 ## Notes
 
-- The camera frame is rotated 90 degrees clockwise before detection and recording. This was done for a Tapo camera mounted in portrait orientation. If your camera is mounted in landscape orientation, comment out the three `cv2.rotate(..., cv2.ROTATE_90_CLOCKWISE)` lines in `detector.py`, currently at lines 329, 388, and 543
+- The camera frame is rotated 90 degrees clockwise before detection and recording. This was done for a Tapo camera mounted in portrait orientation. If your camera is mounted in landscape orientation, comment out the three `cv2.rotate(..., cv2.ROTATE_90_CLOCKWISE)` lines in `detector.py`, currently at lines 381, 445, and 621
 - Face model files are downloaded automatically on first run if they are missing
 - Package detection uses a custom one-class YOLO11n model trained for front-door package detection
 - `temp_logger.sh` is optional and intended for Raspberry Pi systems that provide `vcgencmd`

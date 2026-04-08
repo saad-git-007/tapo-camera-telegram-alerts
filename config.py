@@ -47,6 +47,13 @@ PACKAGE_MODEL_PATH = "/home/pi/telegram_porch_detector/package_yolo11n_ncnn_mode
 PACKAGE_CONF = 0.35
 MIN_PACKAGE_SIZE_PX = 40
 
+# ── Alert rate limiting ─────────────────────────────────────────
+# Minimum time between Telegram alerts for each detection type, even when
+# the new detection appears at a different position in the frame.
+FACE_ALERT_COOLDOWN_SEC = 60
+PERSON_ALERT_COOLDOWN_SEC = 60
+PACKAGE_ALERT_COOLDOWN_SEC = 60
+
 # ── Alert memory / stationary suppression ──────────────────────
 # Treat detections as the same stationary event when the box center and size
 # stay within this many pixels.

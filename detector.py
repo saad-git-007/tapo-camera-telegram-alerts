@@ -94,6 +94,19 @@ class RememberedBox:
     alerted_at: float
 
 
+class AlertCooldown:
+    def __init__(self):
+        self._last_sent: dict[str, float] = {}
+
+    def ready(self, key: str, seconds: float, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        last_sent = self._last_sent.get(key, 0.0)
+        if now - last_sent < float(seconds):
+            return False
+        self._last_sent[key] = now
+        return True
+
+
 class StationaryAlertMemory:
     def __init__(self, label: str, tolerance_px: int, stationary_cooldown_sec: float):
         self.label = label
@@ -158,38 +171,52 @@ class TelegramSender(threading.Thread):
         self._pending = set()
         self._pending_lock = threading.Lock()
 
-    def enqueue(self, image_path: str, caption: str):
-        image_path = os.path.abspath(image_path)
-        with self._pending_lock:
-            self._pending.add(image_path)
-        self._pq.put((time.time(), next(self._counter), image_path, caption, 0))
-        log.info("Alert queued → Telegram: %s", caption.replace("\n", " | "))
+    def enqueue_photo(self, image_path: str, caption: str):
+        self._enqueue_media("photo", image_path, caption)
 
-    def is_pending(self, image_path: str) -> bool:
-        image_path = os.path.abspath(image_path)
-        with self._pending_lock:
-            return image_path in self._pending
+    def enqueue_video(self, video_path: str, caption: str):
+        self._enqueue_media("video", video_path, caption)
 
-    def _mark_done(self, image_path: str):
-        image_path = os.path.abspath(image_path)
+    def _enqueue_media(self, media_kind: str, media_path: str, caption: str):
+        media_path = os.path.abspath(media_path)
         with self._pending_lock:
-            self._pending.discard(image_path)
+            self._pending.add(media_path)
+        self._pq.put((time.time(), next(self._counter), media_kind, media_path, caption, 0))
+        log.info(
+            "%s queued → Telegram: %s",
+            media_kind.title(),
+            caption.replace("\n", " | "),
+        )
+
+    def is_pending(self, media_path: str) -> bool:
+        media_path = os.path.abspath(media_path)
+        with self._pending_lock:
+            return media_path in self._pending
+
+    def _mark_done(self, media_path: str):
+        media_path = os.path.abspath(media_path)
+        with self._pending_lock:
+            self._pending.discard(media_path)
 
     def run(self):
         while True:
-            next_try, _, image_path, caption, attempt = self._pq.get()
+            next_try, _, media_kind, media_path, caption, attempt = self._pq.get()
 
             wait = next_try - time.time()
             if wait > 0:
                 time.sleep(wait)
 
-            if not os.path.exists(image_path):
-                log.warning("Snapshot missing before Telegram send, dropping: %s", image_path)
-                self._mark_done(image_path)
+            if not os.path.exists(media_path):
+                log.warning(
+                    "%s missing before Telegram send, dropping: %s",
+                    media_kind.title(),
+                    media_path,
+                )
+                self._mark_done(media_path)
                 continue
 
-            if self._send_once(image_path, caption):
-                self._mark_done(image_path)
+            if self._send_once(media_kind, media_path, caption):
+                self._mark_done(media_path)
                 continue
 
             attempt += 1
@@ -199,12 +226,28 @@ class TelegramSender(threading.Thread):
                 "Telegram send failed — retry #%d in %ds for %s",
                 attempt,
                 backoff,
-                os.path.basename(image_path),
+                os.path.basename(media_path),
             )
-            self._pq.put((retry_at, next(self._counter), image_path, caption, attempt))
+            self._pq.put(
+                (retry_at, next(self._counter), media_kind, media_path, caption, attempt)
+            )
 
-    def _send_once(self, image_path: str, caption: str) -> bool:
-        url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendPhoto"
+    def _send_once(self, media_kind: str, media_path: str, caption: str) -> bool:
+        if media_kind == "photo":
+            endpoint = "sendPhoto"
+            field_name = "photo"
+            mime_type = "image/jpeg"
+            timeout = (10, 90)
+        elif media_kind == "video":
+            endpoint = "sendVideo"
+            field_name = "video"
+            mime_type = "video/mp4"
+            timeout = (10, 300)
+        else:
+            log.warning("Unknown Telegram media kind: %s", media_kind)
+            return False
+
+        url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/{endpoint}"
 
         data = {
             "chat_id": str(config.TELEGRAM_CHAT_ID),
@@ -219,9 +262,9 @@ class TelegramSender(threading.Thread):
             data["message_thread_id"] = str(config.TELEGRAM_MESSAGE_THREAD_ID)
 
         try:
-            with open(image_path, "rb") as f:
-                files = {"photo": (os.path.basename(image_path), f, "image/jpeg")}
-                r = self._session.post(url, data=data, files=files, timeout=(10, 90))
+            with open(media_path, "rb") as f:
+                files = {field_name: (os.path.basename(media_path), f, mime_type)}
+                r = self._session.post(url, data=data, files=files, timeout=timeout)
 
             if r.status_code != 200:
                 log.warning("Telegram HTTP %s: %s", r.status_code, r.text[:500])
@@ -233,7 +276,12 @@ class TelegramSender(threading.Thread):
                 return False
 
             message_id = payload.get("result", {}).get("message_id")
-            log.info("Telegram sent ✓ message_id=%s file=%s", message_id, os.path.basename(image_path))
+            log.info(
+                "Telegram sent ✓ kind=%s message_id=%s file=%s",
+                media_kind,
+                message_id,
+                os.path.basename(media_path),
+            )
             return True
 
         except Exception as e:
@@ -263,6 +311,8 @@ class MediaCleaner(threading.Thread):
                 video_pattern = os.path.join(config.VIDEO_DIR, "*.mp4")
                 for f in glob.glob(video_pattern):
                     f = os.path.abspath(f)
+                    if self.sender.is_pending(f):
+                        continue
                     if now - os.path.getmtime(f) > config.VIDEO_MAX_AGE_SEC:
                         os.remove(f)
 
@@ -306,16 +356,18 @@ class FrameCapture(threading.Thread):
 
 
 class VideoRecorder(threading.Thread):
-    def __init__(self, capture: FrameCapture):
+    def __init__(self, capture: FrameCapture, sender: TelegramSender):
         super().__init__(daemon=True)
         self.capture = capture
+        self.sender = sender
         self._lock = threading.Lock()
         self._writer = None
         self._video_path = None
         self._stop_at = 0.0
         self._active = False
+        self._telegram_caption = None
 
-    def start_recording(self, reason: str) -> bool:
+    def start_recording(self, reason: str, telegram_caption: str) -> bool:
         with self._lock:
             if self._active:
                 log.info("Video recording already active, skipping new trigger: %s", reason)
@@ -350,6 +402,7 @@ class VideoRecorder(threading.Thread):
             self._video_path = video_path
             self._stop_at = time.time() + float(config.VIDEO_RECORD_SECONDS)
             self._active = True
+            self._telegram_caption = telegram_caption
 
         log.info("Video recording started: %s (reason=%s)", video_path, reason)
         return True
@@ -371,13 +424,17 @@ class VideoRecorder(threading.Thread):
                 with self._lock:
                     writer = self._writer
                     done_path = self._video_path
+                    telegram_caption = self._telegram_caption
                     self._writer = None
                     self._video_path = None
                     self._stop_at = 0.0
                     self._active = False
+                    self._telegram_caption = None
                 if writer is not None:
                     writer.release()
                 log.info("Video recording finished: %s", done_path)
+                if done_path and telegram_caption:
+                    self.sender.enqueue_video(done_path, telegram_caption)
                 continue
 
             frame = self.capture.get_frame()
@@ -480,6 +537,26 @@ def load_package_detector():
     return YOLO(config.PACKAGE_MODEL_PATH, task="detect")
 
 
+def build_photo_caption(kind: str, ts_str: str) -> str:
+    if kind == "face":
+        return f"🙂 *Face detected at porch!*\n{ts_str}"
+    if kind == "person":
+        return f"🚨 *Person detected at porch!*\n{ts_str}"
+    if kind == "package":
+        return f"📦 *Package detected at porch!*\n{ts_str}"
+    raise ValueError(f"Unknown detection kind: {kind}")
+
+
+def build_video_caption(kind: str, ts_str: str) -> str:
+    if kind == "face":
+        return f"🎥 *Face detection video at porch!*\n{ts_str}"
+    if kind == "person":
+        return f"🎥 *Person detection video at porch!*\n{ts_str}"
+    if kind == "package":
+        return f"🎥 *Package detection video at porch!*\n{ts_str}"
+    raise ValueError(f"Unknown detection kind: {kind}")
+
+
 def main():
     validate_config()
 
@@ -497,12 +574,13 @@ def main():
     capture = FrameCapture(config.RTSP_URL)
     capture.start()
 
-    recorder = VideoRecorder(capture)
+    recorder = VideoRecorder(capture, sender)
     recorder.start()
 
     cleaner = MediaCleaner(sender)
     cleaner.start()
 
+    alert_cooldown = AlertCooldown()
     position_tolerance_px = int(getattr(config, "ALERT_POSITION_TOLERANCE_PX", 40))
     face_memory = StationaryAlertMemory(
         "face",
@@ -667,36 +745,55 @@ def main():
         new_person_boxes = person_memory.new_boxes(person_boxes, now=t_start)
         new_package_boxes = package_memory.new_boxes(package_boxes, now=t_start)
 
+        send_face_alert = bool(new_face_boxes) and alert_cooldown.ready(
+            "face",
+            float(getattr(config, "FACE_ALERT_COOLDOWN_SEC", 60)),
+            now=t_start,
+        )
+        send_person_alert = bool(new_person_boxes) and alert_cooldown.ready(
+            "person",
+            float(getattr(config, "PERSON_ALERT_COOLDOWN_SEC", 60)),
+            now=t_start,
+        )
+        send_package_alert = bool(new_package_boxes) and alert_cooldown.ready(
+            "package",
+            float(getattr(config, "PACKAGE_ALERT_COOLDOWN_SEC", 60)),
+            now=t_start,
+        )
+
         video_reason = None
-        if trigger_face:
+        video_caption = None
+        video_ts_str = datetime.now().strftime("%d %b %Y  %I:%M:%S %p")
+        if send_face_alert:
             video_reason = "face"
-        elif trigger_person:
+        elif send_person_alert:
             video_reason = "person"
-        elif trigger_package:
+        elif send_package_alert:
             video_reason = "package"
 
         if video_reason is not None:
-            recorder.start_recording(video_reason)
+            video_caption = build_video_caption(video_reason, video_ts_str)
+            recorder.start_recording(video_reason, video_caption)
 
-        if new_face_boxes:
+        if send_face_alert:
             ts_str = datetime.now().strftime("%d %b %Y  %I:%M:%S %p")
-            caption = f"🙂 *Face detected at porch!*\n{ts_str}"
+            caption = build_photo_caption("face", ts_str)
             image_path = save_snapshot(canvas, "face")
-            sender.enqueue(image_path, caption)
+            sender.enqueue_photo(image_path, caption)
             face_memory.remember_boxes(new_face_boxes, now=t_start)
 
-        if new_person_boxes:
+        if send_person_alert:
             ts_str = datetime.now().strftime("%d %b %Y  %I:%M:%S %p")
-            caption = f"🚨 *Person detected at porch!*\n{ts_str}"
+            caption = build_photo_caption("person", ts_str)
             image_path = save_snapshot(canvas, "person")
-            sender.enqueue(image_path, caption)
+            sender.enqueue_photo(image_path, caption)
             person_memory.remember_boxes(new_person_boxes, now=t_start)
 
-        if new_package_boxes:
+        if send_package_alert:
             ts_str = datetime.now().strftime("%d %b %Y  %I:%M:%S %p")
-            caption = f"📦 *Package detected at porch!*\n{ts_str}"
+            caption = build_photo_caption("package", ts_str)
             image_path = save_snapshot(canvas, "package")
-            sender.enqueue(image_path, caption)
+            sender.enqueue_photo(image_path, caption)
             package_memory.remember_boxes(new_package_boxes, now=t_start)
 
         elapsed = time.time() - t_start
