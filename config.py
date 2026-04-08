@@ -44,7 +44,7 @@ YOLO_CONF = 0.40
 
 # Custom package model
 PACKAGE_MODEL_PATH = "/home/pi/telegram_porch_detector/package_yolo11n_ncnn_model"
-PACKAGE_CONF = 0.35
+PACKAGE_CONF = 0.75
 MIN_PACKAGE_SIZE_PX = 40
 
 # ── Alert rate limiting ─────────────────────────────────────────
@@ -73,6 +73,6 @@ SNAPSHOT_MAX_AGE_SEC = 3600
 
 # ── Videos ─────────────────────────────────────────────────────
 VIDEO_DIR = "/home/pi/porch_videos"
-VIDEO_RECORD_SECONDS = 60
-VIDEO_FPS = 30 #15 fine
+VIDEO_RECORD_SECONDS = 30
+VIDEO_FPS = 30
 VIDEO_MAX_AGE_SEC = 140 * 3600
