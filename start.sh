@@ -5,7 +5,6 @@ SCRIPT_DIR="/home/pi/telegram_porch_detector"
 PYTHON="$SCRIPT_DIR/venv/bin/python3"
 SNAPSHOT_DIR="/home/pi/porch_snapshots"
 VIDEO_DIR="/home/pi/porch_videos"
-LOG_FILE="$SCRIPT_DIR/detector.log"
 
 echo "──────────────────────────────────────────────"
 echo "  Porch Detector — Starting (Telegram edition)"
@@ -38,4 +37,4 @@ sleep 1
 echo "Starting detector..."
 echo "──────────────────────────────────────────────"
 
-exec "$PYTHON" "$SCRIPT_DIR/detector.py" >> "$LOG_FILE" 2>&1
+exec "$PYTHON" "$SCRIPT_DIR/detector.py"

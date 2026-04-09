@@ -21,6 +21,7 @@ import time
 import threading
 import queue
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import glob
 import itertools
@@ -35,12 +36,20 @@ from ultralytics import YOLO
 import config
 
 
+LOG_FILE = Path(__file__).resolve().parent / "detector.log"
+LOG_MAX_BYTES = 3 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("detector.log"),
+        RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+        ),
     ],
 )
 log = logging.getLogger(__name__)
