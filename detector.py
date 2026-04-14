@@ -10,11 +10,13 @@ Detection triggers:
 Alert delivery:
   - Annotated JPEG saved to SNAPSHOT_DIR
   - Telegram bot uploads the local JPEG directly using sendPhoto
-  - 1-minute MP4 video recorded after the first trigger in a burst
+  - Configurable MP4 video with in-memory pre-roll, recorded after the first
+    trigger in a burst and uploaded to Telegram when finished
 """
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import cv2
 import time
@@ -375,6 +377,20 @@ class VideoRecorder(threading.Thread):
         self._stop_at = 0.0
         self._active = False
         self._telegram_caption = None
+        self._pre_roll_frame_capacity = max(
+            0,
+            int(round(float(config.VIDEO_PRE_ROLL_SECONDS) * float(config.VIDEO_FPS))),
+        )
+        self._pre_roll_frames = deque(maxlen=max(1, self._pre_roll_frame_capacity))
+
+    def _prepare_frame(self, frame: np.ndarray) -> np.ndarray:
+        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        add_timestamp(frame)
+        return frame
+
+    def _snapshot_pre_roll_frames(self) -> list[np.ndarray]:
+        with self._lock:
+            return [frame.copy() for frame in self._pre_roll_frames]
 
     def start_recording(self, reason: str, telegram_caption: str) -> bool:
         with self._lock:
@@ -382,13 +398,13 @@ class VideoRecorder(threading.Thread):
                 log.info("Video recording already active, skipping new trigger: %s", reason)
                 return False
 
-        frame = self.capture.get_frame()
-        if frame is None:
-            log.warning("Cannot start video recording: no frame available yet")
-            return False
-
-        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        add_timestamp(frame)
+        buffered_frames = self._snapshot_pre_roll_frames()
+        if not buffered_frames:
+            frame = self.capture.get_frame()
+            if frame is None:
+                log.warning("Cannot start video recording: no frame available yet")
+                return False
+            buffered_frames = [self._prepare_frame(frame)]
 
         Path(config.VIDEO_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -396,7 +412,7 @@ class VideoRecorder(threading.Thread):
         filename = f"{reason}_{ts}.mp4"
         video_path = os.path.abspath(os.path.join(config.VIDEO_DIR, filename))
 
-        h, w = frame.shape[:2]
+        h, w = buffered_frames[-1].shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(video_path, fourcc, float(config.VIDEO_FPS), (w, h))
 
@@ -404,7 +420,8 @@ class VideoRecorder(threading.Thread):
             log.warning("Failed to open video writer for: %s", video_path)
             return False
 
-        writer.write(frame)
+        for buffered_frame in buffered_frames:
+            writer.write(buffered_frame)
 
         with self._lock:
             self._writer = writer
@@ -413,25 +430,37 @@ class VideoRecorder(threading.Thread):
             self._active = True
             self._telegram_caption = telegram_caption
 
-        log.info("Video recording started: %s (reason=%s)", video_path, reason)
+        log.info(
+            "Video recording started: %s (reason=%s pre_roll_frames=%d)",
+            video_path,
+            reason,
+            len(buffered_frames),
+        )
         return True
 
     def run(self):
         frame_interval = 1.0 / float(config.VIDEO_FPS)
 
         while True:
+            frame = self.capture.get_frame()
+            if frame is None:
+                time.sleep(0.02)
+                continue
+
+            prepared_frame = self._prepare_frame(frame)
+            writer_to_release = None
+            done_path = None
+            telegram_caption = None
             with self._lock:
+                if self._pre_roll_frame_capacity > 0:
+                    self._pre_roll_frames.append(prepared_frame.copy())
+
                 active = self._active
                 stop_at = self._stop_at
                 writer = self._writer
 
-            if not active:
-                time.sleep(0.05)
-                continue
-
-            if time.time() >= stop_at:
-                with self._lock:
-                    writer = self._writer
+                if active and time.time() >= stop_at:
+                    writer_to_release = self._writer
                     done_path = self._video_path
                     telegram_caption = self._telegram_caption
                     self._writer = None
@@ -439,26 +468,16 @@ class VideoRecorder(threading.Thread):
                     self._stop_at = 0.0
                     self._active = False
                     self._telegram_caption = None
-                if writer is not None:
-                    writer.release()
+                    writer = None
+
+            if writer is not None:
+                writer.write(prepared_frame)
+
+            if writer_to_release is not None:
+                writer_to_release.release()
                 log.info("Video recording finished: %s", done_path)
                 if done_path and telegram_caption:
                     self.sender.enqueue_video(done_path, telegram_caption)
-                continue
-
-            frame = self.capture.get_frame()
-            if frame is None:
-                time.sleep(0.02)
-                continue
-
-            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-            add_timestamp(frame)
-
-            with self._lock:
-                writer = self._writer
-
-            if writer is not None:
-                writer.write(frame)
 
             time.sleep(frame_interval)
 

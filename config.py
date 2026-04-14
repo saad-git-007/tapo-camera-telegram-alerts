@@ -73,6 +73,12 @@ SNAPSHOT_MAX_AGE_SEC = 3600
 
 # ── Videos ─────────────────────────────────────────────────────
 VIDEO_DIR = "/home/pi/porch_videos"
+# Keep this many seconds of recent frames in memory and prepend them to the
+# saved alert video when a trigger happens.
+VIDEO_PRE_ROLL_SECONDS = 3
+
+# Record this many seconds after the trigger. Total clip length is pre-roll
+# plus this post-trigger duration.
 VIDEO_RECORD_SECONDS = 30
 VIDEO_FPS = 30
 VIDEO_MAX_AGE_SEC = 140 * 3600

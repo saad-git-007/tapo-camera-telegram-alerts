@@ -18,6 +18,7 @@ Tested setup:
 - Detects delivery packages with a custom YOLO11n package model
 - Sends annotated photo alerts and detection videos to Telegram
 - Supports standard chats and Telegram forum topic threads
+- Keeps a configurable in-memory pre-roll buffer so alert videos can include a few seconds before the trigger
 - Records a configurable MP4 clip after the first trigger in a burst
 - Uploads the finished MP4 detection video to Telegram after recording completes
 - Applies separate per-category 60-second alert cooldowns for face, person, and package alerts
@@ -153,7 +154,7 @@ You can also tune:
 - Person height threshold
 - Person bottom blind-spot filter
 - Snapshot and video retention
-- Detection loop FPS and video recording length
+- Detection loop FPS, pre-roll length, and post-trigger video recording length
 
 The default detector loop in `config.py` is conservative for Raspberry Pi use. This project has been tested up to 5 FPS on a Pi 4 with 4 GB RAM. Higher values increased heat and led to thermal throttling in extended runs.
 
@@ -210,10 +211,11 @@ The launcher will:
 
 ## Notes
 
-- The camera frame is rotated 90 degrees clockwise before detection and recording. This was done for a Tapo camera mounted in portrait orientation. If your camera is mounted in landscape orientation, comment out the three `cv2.rotate(..., cv2.ROTATE_90_CLOCKWISE)` lines in `detector.py`, currently at lines 381, 445, and 621
+- The camera frame is rotated 90 degrees clockwise before detection and recording. This was done for a Tapo camera mounted in portrait orientation. If your camera is mounted in landscape orientation, comment out the two `cv2.rotate(..., cv2.ROTATE_90_CLOCKWISE)` calls in `detector.py`
 - Face model files are downloaded automatically on first run if they are missing
 - Package detection uses a custom one-class YOLO11n model trained for front-door package detection
 - Detection videos are sent to Telegram after the recording finishes, not at the instant the recording starts
+- Video pre-roll is kept in memory, not continuously written to disk, so the detector can prepend a few seconds before the trigger without recording full-time video files
 - `temp_logger.sh` is optional and intended for Raspberry Pi systems that provide `vcgencmd`
 
 ## Suggested Pi Usage
