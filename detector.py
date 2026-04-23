@@ -12,6 +12,7 @@ Alert delivery:
   - Telegram bot uploads the local JPEG directly using sendPhoto
   - Configurable MP4 video with in-memory pre-roll, recorded after the first
     trigger in a burst and uploaded to Telegram when finished
+  - Telegram text alerts for long RTSP camera outages and optional recovery
 """
 
 from __future__ import annotations
@@ -188,6 +189,10 @@ class TelegramSender(threading.Thread):
     def enqueue_video(self, video_path: str, caption: str):
         self._enqueue_media("video", video_path, caption)
 
+    def enqueue_message(self, text: str):
+        self._pq.put((time.time(), next(self._counter), "message", None, text, 0))
+        log.info("Message queued → Telegram: %s", text.replace("\n", " | "))
+
     def _enqueue_media(self, media_kind: str, media_path: str, caption: str):
         media_path = os.path.abspath(media_path)
         with self._pending_lock:
@@ -211,60 +216,67 @@ class TelegramSender(threading.Thread):
 
     def run(self):
         while True:
-            next_try, _, media_kind, media_path, caption, attempt = self._pq.get()
+            next_try, _, item_kind, item_path, caption, attempt = self._pq.get()
 
             wait = next_try - time.time()
             if wait > 0:
                 time.sleep(wait)
 
-            if not os.path.exists(media_path):
+            if item_kind != "message" and not os.path.exists(item_path):
                 log.warning(
                     "%s missing before Telegram send, dropping: %s",
-                    media_kind.title(),
-                    media_path,
+                    item_kind.title(),
+                    item_path,
                 )
-                self._mark_done(media_path)
+                self._mark_done(item_path)
                 continue
 
-            if self._send_once(media_kind, media_path, caption):
-                self._mark_done(media_path)
+            if self._send_once(item_kind, item_path, caption):
+                if item_path is not None:
+                    self._mark_done(item_path)
                 continue
 
             attempt += 1
             backoff = min(5 * (2 ** (attempt - 1)), config.TELEGRAM_MAX_RETRY_BACKOFF_SEC)
             retry_at = time.time() + backoff
+            item_label = os.path.basename(item_path) if item_path else item_kind
             log.warning(
                 "Telegram send failed — retry #%d in %ds for %s",
                 attempt,
                 backoff,
-                os.path.basename(media_path),
+                item_label,
             )
             self._pq.put(
-                (retry_at, next(self._counter), media_kind, media_path, caption, attempt)
+                (retry_at, next(self._counter), item_kind, item_path, caption, attempt)
             )
 
-    def _send_once(self, media_kind: str, media_path: str, caption: str) -> bool:
-        if media_kind == "photo":
+    def _send_once(self, item_kind: str, item_path: str | None, caption: str) -> bool:
+        if item_kind == "photo":
             endpoint = "sendPhoto"
             field_name = "photo"
             mime_type = "image/jpeg"
             timeout = (10, 90)
-        elif media_kind == "video":
+        elif item_kind == "video":
             endpoint = "sendVideo"
             field_name = "video"
             mime_type = "video/mp4"
             timeout = (10, 300)
+        elif item_kind == "message":
+            endpoint = "sendMessage"
+            field_name = None
+            mime_type = None
+            timeout = (10, 90)
         else:
-            log.warning("Unknown Telegram media kind: %s", media_kind)
+            log.warning("Unknown Telegram item kind: %s", item_kind)
             return False
 
         url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/{endpoint}"
 
-        data = {
-            "chat_id": str(config.TELEGRAM_CHAT_ID),
-            "caption": caption,
-            "parse_mode": "Markdown",
-        }
+        data = {"chat_id": str(config.TELEGRAM_CHAT_ID), "parse_mode": "Markdown"}
+        if item_kind == "message":
+            data["text"] = caption
+        else:
+            data["caption"] = caption
 
         if config.TELEGRAM_DISABLE_NOTIFICATION:
             data["disable_notification"] = "true"
@@ -273,9 +285,12 @@ class TelegramSender(threading.Thread):
             data["message_thread_id"] = str(config.TELEGRAM_MESSAGE_THREAD_ID)
 
         try:
-            with open(media_path, "rb") as f:
-                files = {field_name: (os.path.basename(media_path), f, mime_type)}
-                r = self._session.post(url, data=data, files=files, timeout=timeout)
+            if item_kind == "message":
+                r = self._session.post(url, data=data, timeout=timeout)
+            else:
+                with open(item_path, "rb") as f:
+                    files = {field_name: (os.path.basename(item_path), f, mime_type)}
+                    r = self._session.post(url, data=data, files=files, timeout=timeout)
 
             if r.status_code != 200:
                 log.warning("Telegram HTTP %s: %s", r.status_code, r.text[:500])
@@ -287,12 +302,8 @@ class TelegramSender(threading.Thread):
                 return False
 
             message_id = payload.get("result", {}).get("message_id")
-            log.info(
-                "Telegram sent ✓ kind=%s message_id=%s file=%s",
-                media_kind,
-                message_id,
-                os.path.basename(media_path),
-            )
+            item_label = os.path.basename(item_path) if item_path else item_kind
+            log.info("Telegram sent ✓ kind=%s message_id=%s item=%s", item_kind, message_id, item_label)
             return True
 
         except Exception as e:
@@ -332,11 +343,63 @@ class MediaCleaner(threading.Thread):
 
 
 class FrameCapture(threading.Thread):
-    def __init__(self, rtsp_url: str):
+    def __init__(self, rtsp_url: str, sender: TelegramSender):
         super().__init__(daemon=True)
         self.rtsp_url = rtsp_url
+        self.sender = sender
         self._frame = None
         self._lock = threading.Lock()
+        self._disconnected_since = None
+        self._disconnect_alert_sent = False
+
+    def _mark_disconnected(self, reason: str):
+        now = time.time()
+        message = None
+        with self._lock:
+            if self._disconnected_since is None:
+                self._disconnected_since = now
+                self._disconnect_alert_sent = False
+                log.warning("Camera stream lost: %s", reason)
+            self._frame = None
+
+            disconnect_delay = float(
+                getattr(config, "CAMERA_DISCONNECT_ALERT_DELAY_SEC", 30 * 60)
+            )
+            if (
+                not self._disconnect_alert_sent
+                and now - self._disconnected_since >= disconnect_delay
+            ):
+                self._disconnect_alert_sent = True
+                message = build_camera_disconnect_message(
+                    disconnected_since=self._disconnected_since,
+                    now=now,
+                )
+
+        if message is not None:
+            self.sender.enqueue_message(message)
+
+    def _mark_connected(self):
+        now = time.time()
+        message = None
+        disconnected_since = None
+        with self._lock:
+            disconnected_since = self._disconnected_since
+            disconnect_alert_sent = self._disconnect_alert_sent
+            self._disconnected_since = None
+            self._disconnect_alert_sent = False
+
+        if disconnected_since is not None:
+            log.info("Camera stream restored ✓")
+            if disconnect_alert_sent and bool(
+                getattr(config, "CAMERA_SEND_RECOVERY_ALERT", True)
+            ):
+                message = build_camera_recovery_message(
+                    disconnected_since=disconnected_since,
+                    recovered_at=now,
+                )
+
+        if message is not None:
+            self.sender.enqueue_message(message)
 
     def run(self):
         while True:
@@ -346,6 +409,7 @@ class FrameCapture(threading.Thread):
 
             if not cap.isOpened():
                 log.warning("Cannot open stream — retrying in 5s")
+                self._mark_disconnected("OpenCV could not open the RTSP stream")
                 time.sleep(5)
                 continue
 
@@ -354,9 +418,11 @@ class FrameCapture(threading.Thread):
                 ret, frame = cap.read()
                 if not ret:
                     log.warning("Frame read failed — reconnecting in 3s")
+                    self._mark_disconnected("OpenCV stopped receiving RTSP frames")
                     break
                 with self._lock:
                     self._frame = frame
+                self._mark_connected()
 
             cap.release()
             time.sleep(3)
@@ -442,24 +508,11 @@ class VideoRecorder(threading.Thread):
         frame_interval = 1.0 / float(config.VIDEO_FPS)
 
         while True:
-            frame = self.capture.get_frame()
-            if frame is None:
-                time.sleep(0.02)
-                continue
-
-            prepared_frame = self._prepare_frame(frame)
             writer_to_release = None
             done_path = None
             telegram_caption = None
             with self._lock:
-                if self._pre_roll_frame_capacity > 0:
-                    self._pre_roll_frames.append(prepared_frame.copy())
-
-                active = self._active
-                stop_at = self._stop_at
-                writer = self._writer
-
-                if active and time.time() >= stop_at:
+                if self._active and time.time() >= self._stop_at:
                     writer_to_release = self._writer
                     done_path = self._video_path
                     telegram_caption = self._telegram_caption
@@ -468,16 +521,29 @@ class VideoRecorder(threading.Thread):
                     self._stop_at = 0.0
                     self._active = False
                     self._telegram_caption = None
-                    writer = None
-
-            if writer is not None:
-                writer.write(prepared_frame)
 
             if writer_to_release is not None:
                 writer_to_release.release()
                 log.info("Video recording finished: %s", done_path)
                 if done_path and telegram_caption:
                     self.sender.enqueue_video(done_path, telegram_caption)
+                time.sleep(frame_interval)
+                continue
+
+            frame = self.capture.get_frame()
+            if frame is None:
+                time.sleep(0.02)
+                continue
+
+            prepared_frame = self._prepare_frame(frame)
+            with self._lock:
+                if self._pre_roll_frame_capacity > 0:
+                    self._pre_roll_frames.append(prepared_frame.copy())
+
+                writer = self._writer
+
+            if writer is not None:
+                writer.write(prepared_frame)
 
             time.sleep(frame_interval)
 
@@ -585,6 +651,43 @@ def build_video_caption(kind: str, ts_str: str) -> str:
     raise ValueError(f"Unknown detection kind: {kind}")
 
 
+def format_duration_brief(total_seconds: float) -> str:
+    seconds = max(0, int(round(total_seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
+def build_camera_disconnect_message(disconnected_since: float, now: float) -> str:
+    started_str = datetime.fromtimestamp(disconnected_since).strftime(
+        "%d %b %Y  %I:%M:%S %p"
+    )
+    duration_str = format_duration_brief(now - disconnected_since)
+    return (
+        "⚠️ *Tapo camera stream offline*\n"
+        f"No RTSP frames have been received for {duration_str}.\n"
+        f"Outage started: {started_str}"
+    )
+
+
+def build_camera_recovery_message(disconnected_since: float, recovered_at: float) -> str:
+    recovered_str = datetime.fromtimestamp(recovered_at).strftime("%d %b %Y  %I:%M:%S %p")
+    duration_str = format_duration_brief(recovered_at - disconnected_since)
+    return (
+        "✅ *Tapo camera stream restored*\n"
+        f"RTSP video resumed after {duration_str} offline.\n"
+        f"Recovered: {recovered_str}"
+    )
+
+
 def main():
     validate_config()
 
@@ -599,7 +702,7 @@ def main():
     sender = TelegramSender()
     sender.start()
 
-    capture = FrameCapture(config.RTSP_URL)
+    capture = FrameCapture(config.RTSP_URL, sender)
     capture.start()
 
     recorder = VideoRecorder(capture, sender)

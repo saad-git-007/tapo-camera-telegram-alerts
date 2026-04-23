@@ -2,7 +2,7 @@
 
 Local porch monitoring for TP-LINK Tapo cameras with RTSP enabled, designed for a Raspberry Pi 4 and above and Telegram-based photo and video alert delivery.
 
-This project watches a local RTSP camera stream, runs local face and object detection, saves annotated snapshots, records post-detection video clips, and sends both photo alerts and completed detection videos to Telegram without any paid cloud service.
+This project watches a local RTSP camera stream, runs local face and object detection, saves annotated snapshots, records post-detection video clips, and sends photo, video, and stream-health alerts to Telegram without any paid cloud service.
 
 Tested setup:
 - Raspberry Pi 4 with 4 GB RAM
@@ -28,6 +28,8 @@ Tested setup:
 - Adds timestamps to saved images and recorded video
 - Retries Telegram uploads automatically with backoff if the network is down
 - Reconnects to the camera stream automatically if RTSP drops
+- Sends a delayed Telegram text alert if the camera stream stays offline for too long
+- Can send a Telegram recovery message when the RTSP stream comes back
 - Cleans up old snapshots and videos automatically
 - Includes helper scripts to test Telegram delivery and fetch your chat ID
 
@@ -144,6 +146,7 @@ Edit `config.py` and set:
 
 You can also tune:
 
+- Camera disconnect alert delay and optional recovery alert
 - Face confidence and minimum face size
 - YOLO confidence
 - Package model path
@@ -157,6 +160,13 @@ You can also tune:
 - Detection loop FPS, pre-roll length, and post-trigger video recording length
 
 The default detector loop in `config.py` is conservative for Raspberry Pi use. This project has been tested up to 5 FPS on a Pi 4 with 4 GB RAM. Higher values increased heat and led to thermal throttling in extended runs.
+
+## Camera Stream Health Alerts
+
+- If the RTSP stream stays offline longer than `CAMERA_DISCONNECT_ALERT_DELAY_SEC`, the detector sends a Telegram text alert about the outage
+- Only one offline message is sent for each continuous disconnect event
+- If `CAMERA_SEND_RECOVERY_ALERT` is enabled, the detector sends a recovery message after the stream comes back
+- These stream-health alerts are separate from face, person, and package detection alerts
 
 ## Alert Suppression Logic
 
@@ -216,6 +226,7 @@ The launcher will:
 - Package detection uses a custom one-class YOLO11n model trained for front-door package detection
 - Detection videos are sent to Telegram after the recording finishes, not at the instant the recording starts
 - Video pre-roll is kept in memory, not continuously written to disk, so the detector can prepend a few seconds before the trigger without recording full-time video files
+- Camera outage alerts are delayed and one-time per continuous disconnect, so a long Wi-Fi dropout does not spam Telegram repeatedly
 - `temp_logger.sh` is optional and intended for Raspberry Pi systems that provide `vcgencmd`
 
 ## Suggested Pi Usage

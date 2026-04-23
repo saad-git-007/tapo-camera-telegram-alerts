@@ -5,6 +5,12 @@
 # ── Camera ──────────────────────────────────────────────────────
 RTSP_URL = 'rtsp://username:password@camera_static_ip_address:554/stream2'
 
+# Send a Telegram text alert if the RTSP stream stays unavailable this long.
+CAMERA_DISCONNECT_ALERT_DELAY_SEC = 30 * 60
+
+# Send a Telegram text alert when the stream comes back after a delayed outage.
+CAMERA_SEND_RECOVERY_ALERT = True
+
 # ── Telegram bot alerts ─────────────────────────────────────────
 # Create a bot with @BotFather and paste the token here.
 TELEGRAM_BOT_TOKEN = ""
