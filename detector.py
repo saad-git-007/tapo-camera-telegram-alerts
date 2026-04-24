@@ -351,6 +351,7 @@ class FrameCapture(threading.Thread):
         self._lock = threading.Lock()
         self._disconnected_since = None
         self._disconnect_alert_sent = False
+        self._last_disconnect_alert_at = None
 
     def _mark_disconnected(self, reason: str):
         now = time.time()
@@ -359,20 +360,38 @@ class FrameCapture(threading.Thread):
             if self._disconnected_since is None:
                 self._disconnected_since = now
                 self._disconnect_alert_sent = False
+                self._last_disconnect_alert_at = None
                 log.warning("Camera stream lost: %s", reason)
             self._frame = None
 
             disconnect_delay = float(
                 getattr(config, "CAMERA_DISCONNECT_ALERT_DELAY_SEC", 30 * 60)
             )
+            repeat_interval = float(
+                getattr(config, "CAMERA_DISCONNECT_REPEAT_REMINDER_SEC", 12 * 3600)
+            )
             if (
                 not self._disconnect_alert_sent
                 and now - self._disconnected_since >= disconnect_delay
             ):
                 self._disconnect_alert_sent = True
+                self._last_disconnect_alert_at = now
                 message = build_camera_disconnect_message(
                     disconnected_since=self._disconnected_since,
                     now=now,
+                    is_reminder=False,
+                )
+            elif (
+                self._disconnect_alert_sent
+                and repeat_interval > 0
+                and self._last_disconnect_alert_at is not None
+                and now - self._last_disconnect_alert_at >= repeat_interval
+            ):
+                self._last_disconnect_alert_at = now
+                message = build_camera_disconnect_message(
+                    disconnected_since=self._disconnected_since,
+                    now=now,
+                    is_reminder=True,
                 )
 
         if message is not None:
@@ -387,6 +406,7 @@ class FrameCapture(threading.Thread):
             disconnect_alert_sent = self._disconnect_alert_sent
             self._disconnected_since = None
             self._disconnect_alert_sent = False
+            self._last_disconnect_alert_at = None
 
         if disconnected_since is not None:
             log.info("Camera stream restored ✓")
@@ -666,13 +686,18 @@ def format_duration_brief(total_seconds: float) -> str:
     return " ".join(parts)
 
 
-def build_camera_disconnect_message(disconnected_since: float, now: float) -> str:
+def build_camera_disconnect_message(
+    disconnected_since: float, now: float, is_reminder: bool = False
+) -> str:
     started_str = datetime.fromtimestamp(disconnected_since).strftime(
         "%d %b %Y  %I:%M:%S %p"
     )
     duration_str = format_duration_brief(now - disconnected_since)
+    title = "⚠️ *Tapo camera stream offline*"
+    if is_reminder:
+        title = "⚠️ *Reminder: Tapo camera stream still offline*"
     return (
-        "⚠️ *Tapo camera stream offline*\n"
+        f"{title}\n"
         f"No RTSP frames have been received for {duration_str}.\n"
         f"Outage started: {started_str}"
     )

@@ -8,6 +8,10 @@ RTSP_URL = 'rtsp://username:password@camera_static_ip_address:554/stream2'
 # Send a Telegram text alert if the RTSP stream stays unavailable this long.
 CAMERA_DISCONNECT_ALERT_DELAY_SEC = 30 * 60
 
+# After the first offline alert, send another reminder this often while the
+# camera stream is still down. Set to 0 to disable repeat reminders.
+CAMERA_DISCONNECT_REPEAT_REMINDER_SEC = 12 * 3600
+
 # Send a Telegram text alert when the stream comes back after a delayed outage.
 CAMERA_SEND_RECOVERY_ALERT = True
 

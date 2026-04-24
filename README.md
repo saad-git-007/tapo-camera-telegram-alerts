@@ -29,6 +29,7 @@ Tested setup:
 - Retries Telegram uploads automatically with backoff if the network is down
 - Reconnects to the camera stream automatically if RTSP drops
 - Sends a delayed Telegram text alert if the camera stream stays offline for too long
+- Can send repeat offline reminder messages at a configurable interval until the stream is restored
 - Can send a Telegram recovery message when the RTSP stream comes back
 - Cleans up old snapshots and videos automatically
 - Includes helper scripts to test Telegram delivery and fetch your chat ID
@@ -146,7 +147,7 @@ Edit `config.py` and set:
 
 You can also tune:
 
-- Camera disconnect alert delay and optional recovery alert
+- Camera disconnect alert delay, repeat reminder interval, and optional recovery alert
 - Face confidence and minimum face size
 - YOLO confidence
 - Package model path
@@ -164,7 +165,8 @@ The default detector loop in `config.py` is conservative for Raspberry Pi use. T
 ## Camera Stream Health Alerts
 
 - If the RTSP stream stays offline longer than `CAMERA_DISCONNECT_ALERT_DELAY_SEC`, the detector sends a Telegram text alert about the outage
-- Only one offline message is sent for each continuous disconnect event
+- If `CAMERA_DISCONNECT_REPEAT_REMINDER_SEC` is greater than `0`, the detector sends another offline reminder at that interval until the stream is restored
+- If `CAMERA_DISCONNECT_REPEAT_REMINDER_SEC` is set to `0`, repeat reminders are disabled
 - If `CAMERA_SEND_RECOVERY_ALERT` is enabled, the detector sends a recovery message after the stream comes back
 - These stream-health alerts are separate from face, person, and package detection alerts
 
@@ -226,7 +228,7 @@ The launcher will:
 - Package detection uses a custom one-class YOLO11n model trained for front-door package detection
 - Detection videos are sent to Telegram after the recording finishes, not at the instant the recording starts
 - Video pre-roll is kept in memory, not continuously written to disk, so the detector can prepend a few seconds before the trigger without recording full-time video files
-- Camera outage alerts are delayed and one-time per continuous disconnect, so a long Wi-Fi dropout does not spam Telegram repeatedly
+- Camera outage alerts are delayed, and repeat reminders can be enabled at a long interval such as every 12 hours until the stream recovers
 - `temp_logger.sh` is optional and intended for Raspberry Pi systems that provide `vcgencmd`
 
 ## Suggested Pi Usage
